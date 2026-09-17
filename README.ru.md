@@ -108,11 +108,6 @@ GLSSHAddRequestEvent ".*" "$(oathtool --totp -b SECRET)"
 ssh -v host 2>&1 | grep GLSSH
 ```
 
-### Сборка
-
-Файлы из `source` перекидываем с заменой в исходный код OpenSSH.
-Выполняем сборку проекта через `make`.
-
 ### Лицензия
 
 GLSSH является расширением OpenSSH и распространяется под той же лицензией.

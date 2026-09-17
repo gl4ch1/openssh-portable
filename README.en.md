@@ -108,11 +108,6 @@ Events are applied in order: each one fires exactly once (or the specified numbe
 ssh -v host 2>&1 | grep GLSSH
 ```
 
-### Building
-
-Copy the files from `source` over the OpenSSH source tree, replacing the originals.
-Build the project with `make`.
-
 ### License
 
 GLSSH is an extension of OpenSSH and is distributed under the same license.
