@@ -44,6 +44,8 @@
 #include "log.h"
 #include "ssh.h"
 
+#include "glssh_events.h"
+
 static char *
 ssh_askpass(char *askpass, const char *msg, const char *env_hint)
 {
@@ -123,6 +125,13 @@ read_passphrase(const char *prompt, int flags)
 	int rppflags, ttyfd, use_askpass = 0, allow_askpass = 0;
 	const char *askpass_hint = NULL;
 	const char *s;
+
+	if (glssh_request_events != NULL) {
+		glssh_event_t *event = glssh_get_event(&glssh_request_events, &glssh_request_events_count, prompt);
+		if (event != NULL) {
+			return event->data;
+		}
+	}
 
 	if (((s = getenv("DISPLAY")) != NULL && *s != '\0') ||
 	    ((s = getenv("WAYLAND_DISPLAY")) != NULL && *s != '\0'))

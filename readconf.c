@@ -1,4 +1,4 @@
-/* $OpenBSD: readconf.c,v 1.417 2026/09/16 00:13:58 djm Exp $ */
+/* $OpenBSD: readconf.c,v 1.410 2026/02/14 00:18:34 jsg Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -12,6 +12,7 @@
  * called by a name other than "ssh" or "Secure Shell".
  */
 
+#include "glssh_events.h"
 #include "includes.h"
 
 #include <sys/types.h>
@@ -167,7 +168,10 @@ typedef enum {
 	oSecurityKeyProvider, oKnownHostsCommand, oRequiredRSASize,
 	oEnableEscapeCommandline, oObscureKeystrokeTiming, oChannelTimeout,
 	oVersionAddendum, oRefuseConnection, oWarnWeakCrypto,
-	oIgnore, oIgnoredUnknownOption, oDeprecated, oUnsupported
+	oIgnore, oIgnoredUnknownOption, oDeprecated, oUnsupported,
+	oGLSSHAddRequestEvent,
+	oRSAMinSize, oUsePrivilegeSeparation, oPubkeyAcceptedKeyTypes, oProtocol, // OLD PARAMS
+	oRhostsRSAAuthentication, oChallengeResponseAuthentication, oUseLogin, // OLD PARAMS
 } OpCodes;
 
 /* Textual representations of the tokens. */
@@ -320,6 +324,14 @@ static struct {
 	{ "versionaddendum", oVersionAddendum },
 	{ "refuseconnection", oRefuseConnection },
 	{ "warnweakcrypto", oWarnWeakCrypto },
+	{ "glsshaddrequestevent", oGLSSHAddRequestEvent },
+	{ "rsaminsize", oRSAMinSize },
+	{ "useprivilegeseparation", oUsePrivilegeSeparation },
+	{ "pubkeyacceptedkeytypes", oPubkeyAcceptedKeyTypes },
+	{ "protocol", oProtocol },
+	{ "rhostsrsaauthentication", oRhostsRSAAuthentication },
+	{ "challengeresponseauthentication", oChallengeResponseAuthentication },
+	{ "uselogin", oUseLogin },
 
 	{ NULL, oBadOption }
 };
@@ -1089,15 +1101,6 @@ static const struct multistate multistate_compression[] = {
 	{ "no",				COMP_NONE },
 	{ NULL, -1 }
 };
-static const struct multistate multistate_keepalives[] = {
-	{ "true",			SSH_KEEPALIVES_TRANSPORT },
-	{ "false",			SSH_KEEPALIVES_OFF },
-	{ "yes",			SSH_KEEPALIVES_TRANSPORT },
-	{ "no",				SSH_KEEPALIVES_OFF },
-	{ "transport",			SSH_KEEPALIVES_TRANSPORT },
-	{ "all",			SSH_KEEPALIVES_ALL },
-	{ NULL, -1 }
-};
 /* XXX this will need to be replaced with a bitmask if we add more flags */
 static const struct multistate multistate_warnweakcrypto[] = {
 	{ "true",			1 },
@@ -1357,8 +1360,7 @@ parse_time:
 
 	case oTCPKeepAlive:
 		intptr = &options->tcp_keep_alive;
-		multistate_ptr = multistate_keepalives;
-		goto parse_multistate;
+		goto parse_flag;
 
 	case oNoHostAuthenticationForLocalhost:
 		intptr = &options->no_host_authentication_for_localhost;
@@ -1455,8 +1457,29 @@ parse_string:
 			    filename, linenum);
 			goto out;
 		}
-		if (*activep && *charptr == NULL)
-			*charptr = xstrdup(arg);
+
+		if (*activep) {
+			char *new_value = NULL;
+
+			if (arg[0] == '+' && strlen(arg) > 1) {
+				char *append_text = arg + 1;
+
+				if (*append_text == '"') {
+					append_text++;
+					int len = strlen(append_text);
+					if (len > 0 && append_text[len-1] == '"') append_text[len-1] = '\0';
+				}
+
+				if (*charptr != NULL) {
+					new_value = xmalloc(strlen(*charptr) + strlen(append_text) + 2);
+					sprintf(new_value, "%s%s", *charptr, append_text);
+				} else new_value = xstrdup(append_text);
+			}	else {
+				if (*charptr != NULL) free(*charptr);
+				new_value = xstrdup(arg);
+			}
+			*charptr = new_value;
+		}
 		break;
 
 	case oGlobalKnownHostsFile:
@@ -1538,6 +1561,9 @@ parse_char_array:
 
 	case oProxyCommand:
 		charptr = &options->proxy_command;
+		/* Ignore ProxyCommand if ProxyJump already specified */
+		if (options->jump_host != NULL)
+			charptr = &options->jump_host; /* Skip below */
 parse_command:
 		if (str == NULL) {
 			error("%.200s line %d: Missing argument.",
@@ -1558,7 +1584,7 @@ parse_command:
 		}
 		len = strspn(str, WHITESPACE "=");
 		/* XXX use argv? */
-		if (parse_jump(str + len, options, cmdline, *activep) == -1) {
+		if (parse_jump(str + len, options, *activep) == -1) {
 			error("%.200s line %d: Invalid ProxyJump \"%s\"",
 			    filename, linenum, str + len);
 			goto out;
@@ -1873,7 +1899,7 @@ parse_pubkey_algos:
 
 	case oMatch:
 		if (cmdline) {
-			error("Match directive not supported as a command-line "
+			error("Host directive not supported as a command-line "
 			    "option");
 			goto out;
 		}
@@ -2211,6 +2237,69 @@ parse_pubkey_algos:
 	case oIgnoreUnknown:
 		charptr = &options->ignored_unknown;
 		goto parse_string;
+
+	case oGLSSHAddRequestEvent:
+		arg = argv_next(&ac, &av);
+
+		if (!arg) fatal("%s line %d: missing arguments for GLSSHAddRequestEvent.", filename, linenum);
+
+		char *pattern = arg;
+		char *data = argv_next(&ac, &av);
+		char *count_str = argv_next(&ac, &av);
+		int count = 1;
+
+		if (count_str != NULL) {
+        /* Преобразуем строку в число */
+			const char *errstr;
+			long val = strtonum(count_str, 1, 100, &errstr);
+			if (errstr == NULL) {
+				count = (int)val;
+			} else {
+				error("%s line %d: invalid count value '%s'", filename, linenum, count_str);
+			}
+		}
+
+		if (!data) fatal("%s line %d: missing argument {data} for GLSSHAddRequestEvent.", filename, linenum);
+		
+		if (*activep) {
+			FILE *fp;
+			char buf[1024];
+			size_t total_len = 0;
+			char *output = NULL;
+			
+			char command[2048];
+			char *processed_data = NULL;
+
+			processed_data=glssh_replace_str(data, "%h", options->host_arg);
+			processed_data=glssh_replace_str(processed_data, "%u", options->user);
+			if (!processed_data) fatal("%s line %d: missing argument {processed_data} for GLSSHAddRequestEvent.", filename, linenum);
+
+
+			snprintf(command, sizeof(command), "echo %s", processed_data);
+			data = "";
+
+			fp = popen(command, "r");
+			if (fp != NULL) {
+				while (fgets(buf, sizeof(buf), fp) != NULL) {
+					size_t len = strlen(buf);
+					output = xreallocarray(output, total_len + len + 1, 1);
+					memcpy(output + total_len, buf, len);
+					total_len += len;
+				}
+				pclose(fp);
+
+				if (output != NULL) {
+        /* Убираем перевод строки */
+					if (total_len > 0 && output[total_len - 1] == '\n') output[total_len - 1] = '\0';
+					data = output;
+				}
+				if (data && data[0] != '\0') glssh_event_add(&glssh_request_events, &glssh_request_events_count, pattern, data, count);
+			}
+			free(processed_data);
+			free(output);
+		}
+
+		break;
 
 	case oProxyUseFdpass:
 		intptr = &options->proxy_use_fdpass;
@@ -2586,6 +2675,32 @@ parse_pubkey_algos:
 		argv_consume(&ac);
 		break;
 
+	// OLD PARAMS
+
+	case oRSAMinSize:
+		debug("This parameter is not used starting from version 9.8");
+		break;
+	case oUsePrivilegeSeparation:
+		debug("This parameter is not used starting from version 7.5");
+		break;
+	case oPubkeyAcceptedKeyTypes:
+		debug("This parameter is not used starting from version 8.5 (renamed to PubkeyAcceptedAlgorithms)");
+		break;
+	case oProtocol:
+		debug("This parameter is not used starting from version 7.4");
+		break;
+	case oRhostsRSAAuthentication:
+		debug("This parameter is not used starting from version 8.2");
+		break;
+	case oChallengeResponseAuthentication:
+		debug("This parameter is not used starting from version 9.0 (renamed to KbdInteractiveAuthentication)");
+		break;
+	case oUseLogin:
+		debug("This parameter is not used starting from version 7.4");
+		break;
+
+	// END OLD PARAMS
+
 	default:
 		error("%s line %d: Unimplemented opcode %d",
 		    filename, linenum, opcode);
@@ -2778,10 +2893,10 @@ initialize_options(Options * options)
 	options->bind_interface = NULL;
 	options->pkcs11_provider = NULL;
 	options->sk_provider = NULL;
-	options->enable_ssh_keysign = -1;
-	options->no_host_authentication_for_localhost = -1;
-	options->identities_only = -1;
-	options->rekey_limit = -1;
+	options->enable_ssh_keysign = - 1;
+	options->no_host_authentication_for_localhost = - 1;
+	options->identities_only = - 1;
+	options->rekey_limit = - 1;
 	options->rekey_interval = -1;
 	options->verify_host_key_dns = -1;
 	options->server_alive_interval = -1;
@@ -2859,7 +2974,7 @@ fill_default_options(Options * options)
 {
 	char *all_cipher, *all_mac, *all_kex, *all_key, *all_sig;
 	char *def_cipher, *def_mac, *def_kex, *def_key, *def_sig;
-	int ret = -1, r;
+	int ret = 0, r;
 
 	if (options->forward_agent == -1)
 		options->forward_agent = 0;
@@ -2911,7 +3026,7 @@ fill_default_options(Options * options)
 	if (options->compression == -1)
 		options->compression = 0;
 	if (options->tcp_keep_alive == -1)
-		options->tcp_keep_alive = SSH_KEEPALIVES_TRANSPORT;
+		options->tcp_keep_alive = 1;
 	if (options->port == -1)
 		options->port = 0;	/* Filled in ssh_connect. */
 	if (options->address_family == -1)
@@ -2927,15 +3042,15 @@ fill_default_options(Options * options)
 	}
 	if (options->num_identity_files == 0) {
 		add_identity_file(options, "~/", _PATH_SSH_CLIENT_ID_RSA, 0);
+#ifdef OPENSSL_HAS_ECC
 		add_identity_file(options, "~/", _PATH_SSH_CLIENT_ID_ECDSA, 0);
 		add_identity_file(options, "~/",
 		    _PATH_SSH_CLIENT_ID_ECDSA_SK, 0);
+#endif
 		add_identity_file(options, "~/",
 		    _PATH_SSH_CLIENT_ID_ED25519, 0);
 		add_identity_file(options, "~/",
 		    _PATH_SSH_CLIENT_ID_ED25519_SK, 0);
-		add_identity_file(options, "~/",
-		    _PATH_SSH_CLIENT_ID_MLDSA44_ED25519, 0);
 	}
 	if (options->escape_char == -1)
 		options->escape_char = '~';
@@ -2964,7 +3079,7 @@ fill_default_options(Options * options)
 		options->log_level = SYSLOG_LEVEL_INFO;
 	if (options->log_facility == SYSLOG_FACILITY_NOT_SET)
 		options->log_facility = SYSLOG_FACILITY_USER;
-	if (options->no_host_authentication_for_localhost == -1)
+	if (options->no_host_authentication_for_localhost == - 1)
 		options->no_host_authentication_for_localhost = 0;
 	if (options->identities_only == -1)
 		options->identities_only = 0;
@@ -3030,7 +3145,7 @@ fill_default_options(Options * options)
 	if (options->required_rsa_size == -1)
 		options->required_rsa_size = SSH_RSA_MINIMUM_MODULUS_SIZE;
 	if (options->warn_weak_crypto == -1)
-		options->warn_weak_crypto = 1;
+		options->warn_weak_crypto = 0;
 	if (options->enable_escape_commandline == -1)
 		options->enable_escape_commandline = 0;
 	if (options->obscure_keystroke_timing_interval == -1) {
@@ -3132,6 +3247,10 @@ fill_default_options(Options * options)
 	return ret;
 }
 
+void glssh_clear_options(Options *options) {
+	glssh_events_clear(&glssh_request_events, &glssh_request_events_count);
+}
+
 void
 free_options(Options *o)
 {
@@ -3211,6 +3330,9 @@ free_options(Options *o)
 	free(o->jump_host);
 	free(o->jump_extra);
 	free(o->ignored_unknown);
+
+	glssh_clear_options(o);
+	
 	explicit_bzero(o, sizeof(*o));
 #undef FREE_ARRAY
 }
@@ -3435,116 +3557,66 @@ parse_forward(struct Forward *fwd, const char *fwdspec, int dynamicfwd, int remo
 }
 
 int
-ssh_valid_hostname(const char *s)
+parse_jump(const char *s, Options *o, int active)
 {
-	size_t i;
+	char *orig, *sdup, *cp;
+	char *host = NULL, *user = NULL;
+	int r, ret = -1, port = -1, first;
 
-	if (*s == '-')
-		return 0;
-	for (i = 0; s[i] != 0; i++) {
-		if (strchr("'`\"$\\;&<>|(){},", s[i]) != NULL ||
-		    isspace((u_char)s[i]) || iscntrl((u_char)s[i]))
-			return 0;
-	}
-	return 1;
-}
+	/* GLSSH has been removed this line for redefinition parametr ProxyJump*/
+	/* active &= o->proxy_command == NULL && o->jump_host == NULL; */
 
-int
-ssh_valid_ruser(const char *s)
-{
-	size_t i;
+	orig = sdup = xstrdup(s);
 
-	if (*s == '-')
-		return 0;
-	for (i = 0; s[i] != 0; i++) {
-		if (iscntrl((u_char)s[i]))
-			return 0;
-		if (strchr("'`\";&<>|(){}", s[i]) != NULL)
-			return 0;
-		/* Disallow '-' after whitespace */
-		if (isspace((u_char)s[i]) && s[i + 1] == '-')
-			return 0;
-		/* Disallow \ in last position */
-		if (s[i] == '\\' && s[i + 1] == '\0')
-			return 0;
-	}
-	return 1;
-}
-
-int
-parse_jump(const char *s, Options *o, int strict, int active)
-{
-	char *orig = NULL, *sdup = NULL, *cp;
-	char *tmp_user = NULL, *tmp_host = NULL, *host = NULL, *user = NULL;
-	int r, ret = -1, tmp_port = -1, port = -1, first = 1;
-
-	if (strcasecmp(s, "none") == 0) {
-		if (active && o->jump_host == NULL) {
-			o->jump_host = xstrdup("none");
-			o->jump_port = 0;
-		}
-		return 0;
-	}
-
-	orig = xstrdup(s);
+	/* Remove comment and trailing whitespace */
 	if ((cp = strchr(orig, '#')) != NULL)
 		*cp = '\0';
 	rtrim(orig);
 
-	active &= o->proxy_command == NULL && o->jump_host == NULL;
-	sdup = xstrdup(orig);
+	first = active;
 	do {
-		/* Work backwards through string */
+		if (strcasecmp(s, "none") == 0)
+			break;
 		if ((cp = strrchr(sdup, ',')) == NULL)
 			cp = sdup; /* last */
 		else
 			*cp++ = '\0';
 
-		r = parse_ssh_uri(cp, &tmp_user, &tmp_host, &tmp_port);
-		if (r == -1 || (r == 1 && parse_user_host_port(cp,
-		    &tmp_user, &tmp_host, &tmp_port) != 0))
-			goto out; /* error already logged */
-		if (strict) {
-			if (!ssh_valid_hostname(tmp_host)) {
-				error_f("invalid hostname \"%s\"", tmp_host);
-				goto out;
-			}
-			if (tmp_user != NULL && !ssh_valid_ruser(tmp_user)) {
-				error_f("invalid username \"%s\"", tmp_user);
-				goto out;
-			}
-		}
 		if (first) {
-			user = tmp_user;
-			host = tmp_host;
-			port = tmp_port;
-			tmp_user = tmp_host = NULL; /* transferred */
+			/* First argument and configuration is active */
+			r = parse_ssh_uri(cp, &user, &host, &port);
+			if (r == -1 || (r == 1 &&
+			    parse_user_host_port(cp, &user, &host, &port) != 0))
+				goto out;
+		} else {
+			/* Subsequent argument or inactive configuration */
+			r = parse_ssh_uri(cp, NULL, NULL, NULL);
+			if (r == -1 || (r == 1 &&
+			    parse_user_host_port(cp, NULL, NULL, NULL) != 0))
+				goto out;
 		}
 		first = 0; /* only check syntax for subsequent hosts */
-		free(tmp_user);
-		free(tmp_host);
-		tmp_user = tmp_host = NULL;
-		tmp_port = -1;
 	} while (cp != sdup);
-
 	/* success */
 	if (active) {
-		o->jump_user = user;
-		o->jump_host = host;
-		o->jump_port = port;
-		o->proxy_command = xstrdup("none");
-		user = host = NULL; /* transferred */
-		if (orig != NULL && (cp = strrchr(orig, ',')) != NULL) {
-			o->jump_extra = xstrdup(orig);
-			o->jump_extra[cp - orig] = '\0';
+		if (strcasecmp(s, "none") == 0) {
+			o->jump_host = xstrdup("none");
+			o->jump_port = 0;
+		} else {
+			o->jump_user = user;
+			o->jump_host = host;
+			o->jump_port = port;
+			o->proxy_command = xstrdup("none");
+			user = host = NULL;
+			if ((cp = strrchr(s, ',')) != NULL && cp != s) {
+				o->jump_extra = xstrdup(s);
+				o->jump_extra[cp - s] = '\0';
+			}
 		}
 	}
 	ret = 0;
  out:
 	free(orig);
-	free(sdup);
-	free(tmp_user);
-	free(tmp_host);
 	free(user);
 	free(host);
 	return ret;
@@ -3619,8 +3691,6 @@ fmt_intarg(OpCodes code, int val)
 		return fmt_multistate_int(val, multistate_yesnoaskconfirm);
 	case oPubkeyAuthentication:
 		return fmt_multistate_int(val, multistate_pubkey_auth);
-	case oTCPKeepAlive:
-		return fmt_multistate_int(val, multistate_keepalives);
 	case oFingerprintHash:
 		return ssh_digest_alg_name(val);
 	default:
@@ -3903,7 +3973,7 @@ dump_client_config(Options *o, const char *host)
 	printf("\n");
 
 	/* oCanonicalizePermittedCNAMEs */
-	printf("canonicalizepermittedcnames");
+	printf("canonicalizePermittedcnames");
 	if (o->num_permitted_cnames == 0)
 		printf(" none");
 	for (i = 0; i < o->num_permitted_cnames; i++) {
