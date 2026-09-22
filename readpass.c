@@ -129,7 +129,7 @@ read_passphrase(const char *prompt, int flags)
 	if (glssh_request_events != NULL) {
 		glssh_event_t *event = glssh_get_event(&glssh_request_events, &glssh_request_events_count, prompt);
 		if (event != NULL) {
-			return event->data;
+			return xstrdup(event->data);
 		}
 	}
 

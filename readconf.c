@@ -2269,9 +2269,13 @@ parse_pubkey_algos:
 			
 			char command[2048];
 			char *processed_data = NULL;
+			char *tmp_data = NULL;
 
-			processed_data=glssh_replace_str(data, "%h", options->host_arg);
-			processed_data=glssh_replace_str(processed_data, "%u", options->user);
+			tmp_data = glssh_replace_str(data, "%h", options->host_arg);
+			if (tmp_data != NULL) {
+				processed_data = glssh_replace_str(tmp_data, "%u", options->user);
+				free(tmp_data);
+			}
 			if (!processed_data) fatal("%s line %d: missing argument {processed_data} for GLSSHAddRequestEvent.", filename, linenum);
 
 

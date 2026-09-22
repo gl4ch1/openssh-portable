@@ -81,7 +81,7 @@ int glssh_event_add(glssh_event_t **events, int *count, const char *pattern, con
 
 	*events = new_events;
 
-	(*events)[*count].pattern = xstrdup(pattern);
+	(*events)[*count].pattern = pattern != NULL ? xstrdup(pattern) : NULL;
 	(*events)[*count].data = xstrdup(data);
 	(*events)[*count].process_count = process_count;
 	(*events)[*count].processed = 0;
